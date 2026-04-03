@@ -51,3 +51,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# training epoch adjust 42520
