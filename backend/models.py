@@ -35,3 +35,5 @@ class ThreatIntelligence(Base):
     first_seen = Column(DateTime, default=datetime.datetime.utcnow)
     flag_count = Column(Integer, default=0)
     status = Column(String, default="suspicious")
+
+# model constraint 61519
