@@ -115,3 +115,5 @@ def extract_kaggle_features(url: str):
         'DoubleSlashInPath': double_slash_in_path,
         'Extra_Entropy': entropy # Retained for our own thresholding logic if needed
     }
+
+# feature regex update 79366
