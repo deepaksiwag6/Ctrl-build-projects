@@ -37,3 +37,5 @@ class ThreatIntelligence(Base):
     status = Column(String, default="suspicious")
 
 # model constraint 61519
+
+# model constraint 89131
