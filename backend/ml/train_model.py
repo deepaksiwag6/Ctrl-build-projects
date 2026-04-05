@@ -59,3 +59,5 @@ if __name__ == "__main__":
 # training epoch adjust 56302
 
 # training epoch adjust 97898
+
+# training epoch adjust 34385
