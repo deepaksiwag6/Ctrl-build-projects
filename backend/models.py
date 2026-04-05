@@ -41,3 +41,5 @@ class ThreatIntelligence(Base):
 # model constraint 89131
 
 # model constraint 40147
+
+# model constraint 24866
