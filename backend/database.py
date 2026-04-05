@@ -19,3 +19,5 @@ def get_db():
         db.close()
 
 # db sync check 22146
+
+# db sync check 10512
