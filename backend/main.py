@@ -39,3 +39,5 @@ def read_root():
     return {"message": "Welcome to PhishShield API"}
 
 # middleware config 99278
+
+# middleware config 69065
