@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+__pycache__/
+venv/
+.venv/
+
+# Environment Variables
+.env
+.env.local
+.env.development
+.env.production
+
+# Build folders
+dist/
+build/
+.next/
+
+# OS/Editor Files
+.DS_Store
+.vscode/
+.idea/
+*.log
