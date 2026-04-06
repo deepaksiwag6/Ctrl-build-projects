@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 import joblib
@@ -36,8 +36,8 @@ def main():
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    print("Training Random Forest Classifier on URL Features...")
-    clf = RandomForestClassifier(n_estimators=100, random_state=42)
+    print("Training Logistic Regression Model on URL Features...")
+    clf = LogisticRegression(max_iter=1000, random_state=42)
     clf.fit(X_train, y_train)
 
     print("Evaluating Model...")

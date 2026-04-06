@@ -17,20 +17,15 @@ class ScanHistory(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, index=True)
     
-    scan_type = Column(String) # 'url' or 'email'
-    target_domain = Column(String, index=True, nullable=True)
-    target_ip = Column(String, nullable=True)
-    content_hash = Column(String, index=True, nullable=True)
-    
-    content = Column(String)
+    url = Column(String, index=True)
+    domain_name = Column(String, index=True, nullable=True)
     
     risk_score = Column(Float)
-    initial_risk_score = Column(Float, nullable=True)
     is_phishing = Column(Boolean)
     explanation = Column(String)
+    suggested_url = Column(String, nullable=True)
     
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
-    last_rescanned_at = Column(DateTime, nullable=True)
 
 
 class ThreatIntelligence(Base):
