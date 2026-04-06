@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import database, models
@@ -7,15 +7,25 @@ from thefuzz import process
 import joblib
 import pandas as pd
 import os
-from ml.feature_extractor import extract_kaggle_features
+import re
+import io
+import subprocess
+import sys
+from ml.preprocess import preprocess_single_url, FEATURE_COLUMNS
 
+# ── Model loading ──────────────────────────────────────────────────────────────
 model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'ml', 'phishing_model.pkl')
-try:
-    lr_model = joblib.load(model_path)
-except Exception as e:
-    print(f"Warning: Could not load ML model: {e}")
-    lr_model = None
 
+def load_model():
+    try:
+        return joblib.load(model_path)
+    except Exception as e:
+        print(f"Warning: Could not load ML model: {e}")
+        return None
+
+lr_model = load_model()
+
+# ── Router & schemas ───────────────────────────────────────────────────────────
 router = APIRouter()
 
 class ScanURLRequest(BaseModel):
@@ -26,142 +36,217 @@ class ScanResponse(BaseModel):
     is_phishing: bool
     reasons: list[str]
     suggested_url: str | None = None
-
-TRUSTED_DOMAINS = [
-    "google.com", "amazon.com", "paypal.com", "apple.com", "microsoft.com", 
-    "facebook.com", "netflix.com", "bankofamerica.com", "chase.com"
-]
-
-@router.post("/scan-url", response_model=ScanResponse)
-def scan_url(request: ScanURLRequest, db: Session = Depends(database.get_db)):
-    url = request.url.strip()
-    if not url.startswith("http"):
-        url = "http://" + url
-        
-    parsed = urllib.parse.urlparse(url)
-    domain = parsed.netloc.split(":")[0].lower()
-    
-    risk_score = 0.0
-    reasons = []
-    suggested_url = None
-    
-    # 1. Similarity Engine (Fuzzy Matching)
-    # Exclude exact matches first:
-    if domain in TRUSTED_DOMAINS:
-        # It's exactly a trusted domain
-        pass
-    else:
-        # Check fuzzy matching
-        closest_match, score = process.extractOne(domain, TRUSTED_DOMAINS)
-        if score > 85 and score < 100:
-            risk_score += 80  # Typo squatting is extremely high risk
-            reasons.append(f"Domain '{domain}' is suspiciously similar to trusted domain '{closest_match}'.")
-            suggested_url = f"https://{closest_match}"
-    
-    # 2. Rule based Engine
-    if not url.startswith("https://"):
-        risk_score += 30
-        reasons.append("Connection is not secured with HTTPS.")
-        
-    suspicious_chars = ['@', '|', '%']
-    found_chars = [c for c in suspicious_chars if c in url]
-    if found_chars:
-        risk_score += 20
-        reasons.append(f"Suspicious characters detected in URL: {' '.join(found_chars)}")
-        
-    if len(url) > 100:
-        risk_score += 15
-        reasons.append("URL length is unusually long, hiding real intent.")
-        
-    import re
-    if re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', domain):
-        risk_score += 50
-        reasons.append("Domain is a raw IP address, typically used in evasion.")
-        
-    if domain.count('.') > 2:
-        risk_score += 10
-        reasons.append(f"Multiple subdomains detected ({domain.count('.')} sublevels).")
-
-    # 3. ML Layer (Logistic Regression)
-    if lr_model is not None:
-        features = extract_kaggle_features(url)
-        feature_columns = [
-            'NumDots', 'SubdomainLevel', 'PathLevel', 'UrlLength', 'NumDash',
-            'NumDashInHostname', 'AtSymbol', 'TildeSymbol', 'NumUnderscore',
-            'NumPercent', 'NumQueryComponents', 'NumAmpersand', 'NumHash',
-            'NumNumericChars', 'NoHttps', 'RandomString', 'IpAddress',
-            'HostnameLength', 'PathLength', 'QueryLength', 'DoubleSlashInPath'
-        ]
-        inference_features = {k: features[k] for k in feature_columns}
-        df_features = pd.DataFrame([inference_features], columns=feature_columns)
-        
-        try:
-            prob = lr_model.predict_proba(df_features)[0][1] * 100
-            ml_risk = prob
-            risk_score = (risk_score * 0.6) + (ml_risk * 0.4)
-            reasons.append(f"ML Model Analysis computed a baseline risk of {ml_risk:.1f}%.")
-        except Exception:
-            pass
-
-    risk_score = min(risk_score, 100.0)
-    is_phishing = risk_score > 60.0
-    
-    if not reasons:
-        reasons.append("No suspicious indicators found. URL appears safe.")
-        
-    # Save to history
-    new_scan = models.ScanHistory(
-        user_id=1, 
-        url=url,
-        domain_name=domain,
-        risk_score=risk_score,
-        is_phishing=is_phishing,
-        explanation="; ".join(reasons),
-        suggested_url=suggested_url
-    )
-    db.add(new_scan)
-    db.commit()
-
-    return ScanResponse(
-        risk_score=risk_score, 
-        is_phishing=is_phishing, 
-        reasons=reasons, 
-        suggested_url=suggested_url
-    )
+    feature_breakdown: dict | None = None
 
 class LoginRequest(BaseModel):
     email: str
     password: str
 
+class TrainResponse(BaseModel):
+    success: bool
+    message: str
+    accuracy: float | None = None
+
+# ── Trusted domain list for fuzzy matching ─────────────────────────────────────
+TRUSTED_DOMAINS = [
+    "google.com", "amazon.com", "paypal.com", "apple.com", "microsoft.com",
+    "facebook.com", "netflix.com", "bankofamerica.com", "chase.com",
+    "instagram.com", "twitter.com", "linkedin.com", "github.com",
+    "yahoo.com", "gmail.com", "outlook.com", "dropbox.com",
+]
+
+# ── /scan-url ──────────────────────────────────────────────────────────────────
+@router.post("/scan-url", response_model=ScanResponse)
+def scan_url(request: ScanURLRequest, db: Session = Depends(database.get_db)):
+    global lr_model
+    url = request.url.strip()
+    if not url.startswith("http"):
+        url = "https://" + url
+
+    parsed = urllib.parse.urlparse(url)
+    domain = parsed.netloc.split(":")[0].lower()
+
+    risk_score = 0.0
+    reasons = []
+    suggested_url = None
+
+    # 1. Fuzzy similarity engine (typo-squatting detection)
+    if domain and domain not in TRUSTED_DOMAINS:
+        match_result = process.extractOne(domain, TRUSTED_DOMAINS)
+        if match_result:
+            closest_match, score = match_result
+            if 85 < score < 100:
+                risk_score += 80
+                reasons.append(
+                    f"Domain '{domain}' looks like typo-squatting of '{closest_match}' "
+                    f"(similarity {score}%)."
+                )
+                suggested_url = f"https://{closest_match}"
+
+    # 2. Rule-based engine
+    if not url.startswith("https://"):
+        risk_score += 30
+        reasons.append("Connection is not secured with HTTPS.")
+
+    found_chars = [c for c in ['@', '|'] if c in url]
+    if found_chars:
+        risk_score += 20
+        reasons.append(f"Suspicious characters in URL: {' '.join(found_chars)}")
+
+    if len(url) > 100:
+        risk_score += 15
+        reasons.append(f"URL is unusually long ({len(url)} chars) — often used to hide real destination.")
+
+    if re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', domain):
+        risk_score += 50
+        reasons.append("Domain is a raw IP address — legitimate sites don't use IPs.")
+
+    if domain.count('.') > 3:
+        risk_score += 15
+        reasons.append(f"Excessive subdomain depth ({domain.count('.')} dots) is a red flag.")
+
+    # 3. ML layer (Logistic Regression on Kaggle features)
+    features = preprocess_single_url(url)
+    feature_breakdown = {}
+    if lr_model is None:
+        lr_model = load_model()
+
+    if lr_model is not None:
+        try:
+            df_feat = pd.DataFrame([{k: features[k] for k in FEATURE_COLUMNS}], columns=FEATURE_COLUMNS)
+            prob = lr_model.predict_proba(df_feat)[0][1] * 100
+            risk_score = (risk_score * 0.6) + (prob * 0.4)
+            reasons.append(f"ML model (Logistic Regression) assigned {prob:.1f}% baseline phishing probability.")
+            # Human-readable feature breakdown
+            feature_breakdown = {
+                "URL Length": features['UrlLength'],
+                "Subdomain Depth": features['SubdomainLevel'],
+                "Has IP Address": bool(features['IpAddress']),
+                "No HTTPS": bool(features['NoHttps']),
+                "@ Symbol": bool(features['AtSymbol']),
+                "High Entropy (random string)": bool(features['RandomString']),
+                "Double Slash in Path": bool(features['DoubleSlashInPath']),
+            }
+        except Exception as ex:
+            print(f"ML inference error: {ex}")
+
+    risk_score = min(risk_score, 100.0)
+    is_phishing = risk_score > 55.0
+
+    if not reasons:
+        reasons.append("No suspicious indicators found. URL appears safe.")
+
+    # Save to scan history
+    try:
+        new_scan = models.ScanHistory(
+            user_id=1,
+            url=url,
+            domain_name=domain,
+            risk_score=risk_score,
+            is_phishing=is_phishing,
+            explanation="; ".join(reasons),
+            suggested_url=suggested_url,
+        )
+        db.add(new_scan)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"DB save error: {e}")
+
+    return ScanResponse(
+        risk_score=risk_score,
+        is_phishing=is_phishing,
+        reasons=reasons,
+        suggested_url=suggested_url,
+        feature_breakdown=feature_breakdown,
+    )
+
+# ── /auth/login ────────────────────────────────────────────────────────────────
 @router.post("/auth/login")
 def login(request: LoginRequest):
     if not request.email.lower().endswith("@gmail.com"):
         raise HTTPException(status_code=400, detail="Only @gmail.com accounts are permitted.")
     if len(request.password) < 6:
-        raise HTTPException(status_code=400, detail="Password too short.")
-    
-    return {"token": "dummy_phishshield_token_123"}
+        raise HTTPException(status_code=400, detail="Password is too short (min 6 chars).")
+    return {"token": "phishshield_demo_token_2026", "email": request.email}
 
-# optimize 25423 route handling
+# ── /train ─────────────────────────────────────────────────────────────────────
+@router.post("/train", response_model=TrainResponse)
+async def train_model(file: UploadFile = File(None)):
+    """
+    Re-train the Logistic Regression model.
+    If a CSV file is uploaded it is used; otherwise the built-in dataset.csv is used.
+    Returns training accuracy after completion.
+    """
+    global lr_model
 
-# optimize 99431 route handling
+    backend_dir = os.path.dirname(os.path.dirname(__file__))
 
-# optimize 80787 route handling
+    # If a new CSV was uploaded, save it as dataset.csv
+    if file and file.filename:
+        content = await file.read()
+        try:
+            df_uploaded = pd.read_csv(io.BytesIO(content))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Could not parse CSV: {e}")
 
-# optimize 28382 route handling
+        # Save over dataset.csv
+        upload_path = os.path.join(backend_dir, 'dataset.csv')
+        df_uploaded.to_csv(upload_path, index=False)
 
-# optimize 94948 route handling
+    # Run the train script in a subprocess so uvicorn doesn't block
+    script = os.path.join(backend_dir, 'ml', 'train_model.py')
+    result = subprocess.run(
+        [sys.executable, script],
+        capture_output=True,
+        text=True,
+        cwd=backend_dir,
+    )
 
-# optimize 57527 route handling
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Training failed:\n{result.stderr}"
+        )
 
-# optimize 2782 route handling
+    # Reload the freshly trained model
+    lr_model = load_model()
 
-# optimize 97205 route handling
+    # Parse accuracy from stdout  e.g. "accuracy    0.92"
+    accuracy = None
+    for line in result.stdout.splitlines():
+        if 'accuracy' in line.lower():
+            parts = line.split()
+            for part in parts:
+                try:
+                    v = float(part)
+                    if 0 < v <= 1:
+                        accuracy = round(v * 100, 2)
+                        break
+                except ValueError:
+                    pass
 
-# optimize 62085 route handling
+    return TrainResponse(
+        success=True,
+        message="Model retrained successfully on the latest dataset.",
+        accuracy=accuracy,
+    )
 
-# optimize 43220 route handling
-
-# optimize 86123 route handling
-
-# optimize 60046 route handling
+# ── /scan-history ──────────────────────────────────────────────────────────────
+@router.get("/scan-history")
+def get_scan_history(db: Session = Depends(database.get_db)):
+    scans = db.query(models.ScanHistory).order_by(
+        models.ScanHistory.id.desc()
+    ).limit(50).all()
+    return [
+        {
+            "id": s.id,
+            "url": s.url,
+            "domain_name": s.domain_name,
+            "risk_score": s.risk_score,
+            "is_phishing": s.is_phishing,
+            "explanation": s.explanation,
+            "suggested_url": s.suggested_url,
+        }
+        for s in scans
+    ]
