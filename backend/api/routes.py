@@ -148,3 +148,5 @@ def scan_url(request: ScanURLRequest, db: Session = Depends(database.get_db)):
 # optimize 62085 route handling
 
 # optimize 43220 route handling
+
+# optimize 86123 route handling
