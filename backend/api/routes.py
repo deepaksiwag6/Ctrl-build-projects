@@ -129,6 +129,19 @@ def scan_url(request: ScanURLRequest, db: Session = Depends(database.get_db)):
         suggested_url=suggested_url
     )
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+@router.post("/auth/login")
+def login(request: LoginRequest):
+    if not request.email.lower().endswith("@gmail.com"):
+        raise HTTPException(status_code=400, detail="Only @gmail.com accounts are permitted.")
+    if len(request.password) < 6:
+        raise HTTPException(status_code=400, detail="Password too short.")
+    
+    return {"token": "dummy_phishshield_token_123"}
+
 # optimize 25423 route handling
 
 # optimize 99431 route handling
